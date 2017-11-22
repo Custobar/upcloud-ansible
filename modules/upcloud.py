@@ -104,6 +104,12 @@ options:
         description:
         - Optional list of strings. SSH keys that should be added to the given user.
         - When user and ssh_keys are being used, no password is delivered in API response.
+    modify:
+        description:
+        - Modify server if it already exists
+        default: no
+        choices: [ "yes", "no" ]
+
 notes:
     - UPCLOUD_API_USER and UPCLOUD_API_PASSWD environment variables may be used instead of api_user and api_passwd
     - Better description of UpCloud's API available at U(www.upcloud.com/api/)
@@ -169,8 +175,7 @@ class ServerManager():
     def __init__(self, api_user, api_passwd):
         self.manager = CloudManager(api_user, api_passwd)
 
-
-    def find_server(self, uuid, hostname):
+    def find_server(self, uuid, hostname, module):
         """
         Finds a server first by uuid (if given) and then by hostname.
 
@@ -202,13 +207,12 @@ class ServerManager():
 
         return None
 
-
-    def create_server(self, module):
+    def get_server_dict(self, module, include_only=None):
         """Create a server from module.params. Filters out unwanted attributes."""
 
         # filter out 'filter_keys' and those who equal None from items to get server's attributes for POST request
         items = module.params.items()
-        filter_keys = set(['state', 'api_user', 'api_passwd', 'user', 'ssh_keys'])
+        filter_keys = set(['state', 'api_user', 'api_passwd', 'user', 'ssh_keys', 'modify'])
         server_dict = dict((key,value) for key, value in items if key not in filter_keys and value is not None)
 
         if module.params.get('ssh_keys'):
@@ -219,7 +223,20 @@ class ServerManager():
             )
             server_dict['login_user'] = login_user
 
-        return self.manager.create_server(server_dict)
+        if include_only:
+            server_dict = dict((key, value) for key, value in server_dict.items() if key in include_only)
+
+        for bool_field in 'firewall', 'vnc': # General way would be nicer, but this fixes the boolean vs string
+            if bool_field in server_dict:
+                server_dict[bool_field] = 'on' if server_dict[bool_field] else 'off'
+
+        return server_dict
+
+    def create_server(self, module):
+        return self.manager.create_server(self.get_server_dict(module))
+
+    def modify_server(self, uuid,  module):
+        return self.manager.modify_server(uuid, **self.get_server_dict(module, upcloud_api.Server.updateable_fields))
 
 
 def run(module, server_manager):
@@ -232,21 +249,25 @@ def run(module, server_manager):
     changed = True
 
     if state == 'present':
-        server = server_manager.find_server(uuid, hostname)
-
+        server = server_manager.find_server(uuid, hostname, module)
         if not server:
             # create server, if one was not found
             server = server_manager.create_server(module)
         else:
-            if server.state=='started':
-                changed = False
+            changed = server.state != 'started'
+            if module.params.get('modify'):
+                for key, value in server_manager.get_server_dict(module, upcloud_api.Server.updateable_fields).items():
+                    if key in upcloud_api.Server.updateable_fields and (not hasattr(server, key) or str(value) != str(getattr(server, key))):
+                        server = server_manager.modify_server(server.uuid, module)
+                        changed = True
+                        break
 
         server.ensure_started()
 
         module.exit_json(changed=changed, server=server.to_dict(), public_ip=server.get_public_ip())
 
     elif state == 'absent':
-        server = server_manager.find_server(uuid, hostname)
+        server = server_manager.find_server(uuid, hostname, module)
 
         if server:
             server.stop_and_destroy()
@@ -263,6 +284,8 @@ def main():
             state = dict(choices=['present', 'absent'], default='present'),
             api_user = dict(aliases=['CLIENT_ID'], no_log=True),
             api_passwd = dict(aliases=['API_KEY'], no_log=True),
+
+            modify = dict(type='bool'),
 
             # required for creation
             title = dict(type='str'),
@@ -290,7 +313,7 @@ def main():
             password_delivery = dict(type='str'),
             nic_model = dict(type='str'),
             boot_order = dict(type='str'),
-            avoid_host = dict(type='str')
+            avoid_host = dict(type='str'),
         ),
         required_together = (
             ['core_number', 'memory_amount'],
