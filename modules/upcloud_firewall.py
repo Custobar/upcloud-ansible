@@ -190,13 +190,13 @@ class FirewallManager():
         def match_firewall_rule(given_rule, host_rule):
             """ Match given_rule against one host_rule """
             for field in given_rule:
-                if str(given_rule[field]) != str(getattr(host_rule, field)):
+                if str(given_rule[field]) != str(getattr(host_rule, field)): # this gives false positive when given rule is subset, but not exact of host rule
                     return False
             return True
 
         # Theoretically O(n^2) worst case, but in practice it is much closer to O(n)
         for host_rule in host_rules:
-            if match_firewall_rule(given_rule, host_rule):
+            if match_firewall_rule(given_rule, host_rule): # This returns first match
                 return True, host_rule.position
 
         return False, -1
@@ -237,7 +237,6 @@ def run(module, firewall_manager):
                 firewall_manager.manager.create_firewall_rule(uuid, rule)
                 changed = True
 
-
     # delete any given rule that matches an existing one
     if state == 'absent':
         for rule in firewall_rules:
@@ -254,6 +253,22 @@ def run(module, firewall_manager):
                 else:
                     break
 
+    if state == 'replace':
+        if len(host_rules) != len(firewall_rules):
+            changed = True
+
+        if not changed:
+            for index, rule in enumerate(firewall_rules, 1):
+                matched, position = firewall_manager.match_firewall_rules(rule, host_rules)
+                if not matched or str(position) != str(index):
+                    changed = True
+
+        if changed:
+            for rule in sorted(host_rules, key=lambda r: - int(r.position)):
+                firewall_manager.manager.delete_firewall_rule(uuid, rule.position)
+            for rule in firewall_rules:
+                firewall_manager.manager.create_firewall_rule(uuid, rule)
+
     module.exit_json(changed=changed)
 
 
@@ -263,7 +278,7 @@ def main():
 
     module = AnsibleModule(
         argument_spec = dict(
-            state = dict(choices=['present', 'absent'], default='present'),
+            state = dict(choices=['present', 'absent', 'replace'], default='present'),
             api_user = dict(aliases=['UPCLOUD_API_USER'], no_log=True),
             api_passwd = dict(aliases=['UPCLOUD_API_PASSWD'], no_log=True),
 
